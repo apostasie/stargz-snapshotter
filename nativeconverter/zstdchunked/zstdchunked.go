@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -85,6 +86,10 @@ func LayerConvertWithLayerOptsFuncWithCompressionLevel(compressionLevel zstd.Enc
 	}
 }
 
+type unMap struct {
+	mu sync.Mutex
+}
+
 // LayerConvertFuncWithCompressionLevel converts legacy tar.gz layers into zstd:chunked layers with
 // the specified compression level.
 //
@@ -93,6 +98,9 @@ func LayerConvertWithLayerOptsFuncWithCompressionLevel(compressionLevel zstd.Enc
 // See LayerConvertFunc for more details. The difference between this function and
 // LayerConvertFunc is that this allows configuring the compression level.
 func LayerConvertFuncWithCompressionLevel(compressionLevel zstd.EncoderLevel, opts ...estargz.Option) converter.ConvertFunc {
+	var mu sync.Mutex
+	uncompressMap := map[digest.Digest]*unMap{}
+
 	return func(ctx context.Context, cs content.Store, desc ocispec.Descriptor) (*ocispec.Descriptor, error) {
 		if !images.IsLayerType(desc.MediaType) {
 			// No conversion. No need to return an error here.
@@ -101,6 +109,14 @@ func LayerConvertFuncWithCompressionLevel(compressionLevel zstd.EncoderLevel, op
 		uncompressedDesc := &desc
 		// We need to uncompress the archive first
 		if !uncompress.IsUncompressedType(desc.MediaType) {
+			mu.Lock()
+			if _, ok := uncompressMap[desc.Digest]; !ok {
+				uncompressMap[desc.Digest] = &unMap{}
+			}
+			uncompressMap[desc.Digest].mu.Lock()
+			mu.Unlock()
+			defer uncompressMap[desc.Digest].mu.Unlock()
+
 			var err error
 			uncompressedDesc, err = uncompress.LayerConvertFunc(ctx, cs, desc)
 			if err != nil {
